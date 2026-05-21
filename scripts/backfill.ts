@@ -155,7 +155,9 @@ async function main() {
     cursor = addDays(progress.oldest_date_loaded, -1);
     console.log(`[backfill] resuming, next date to load: ${cursor}`);
   } else {
-    cursor = formatDate(new Date());
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    cursor = formatDate(yesterday);
     console.log(`[backfill] fresh start, first date to attempt: ${cursor}`);
   }
 
