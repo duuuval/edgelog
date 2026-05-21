@@ -129,11 +129,19 @@ async function insertBars(date: string, bars: PolygonBar[]) {
     close: b.c,
     volume: Math.round(b.v),
   }));
-  // upsert (on conflict do nothing) — re-running for the same day is a no-op
-  const { error } = await supabase
-    .from("daily_bars")
-    .upsert(rows, { onConflict: "ticker,date", ignoreDuplicates: true });
-  if (error) throw new Error(`insert ${date}: ${error.message}`);
+
+  // Chunk the payload into batches of 3,000 to prevent Supabase timeouts
+  const BATCH_SIZE = 3000;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    
+    // upsert (on conflict do nothing) — re-running for the same day is a no-op
+    const { error } = await supabase
+      .from("daily_bars")
+      .upsert(batch, { onConflict: "ticker,date", ignoreDuplicates: true });
+      
+    if (error) throw new Error(`insert ${date} (batch ${i}): ${error.message}`);
+  }
 }
 
 // --- Main ---
