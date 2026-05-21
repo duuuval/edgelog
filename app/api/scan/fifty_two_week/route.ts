@@ -1,25 +1,38 @@
 import { NextResponse } from "next/server";
 
 // 52-week high scanner via Finnhub free tier
-// Strategy: scan a curated universe of liquid large-caps, check each for
+// Strategy: scan a curated universe of liquid small/mid-caps, check each for
 // proximity to 52w high. Free tier: 60 calls/min — fits comfortably.
+//
+// v2 small-cap pivot: the 52w breakout edge is strongest in less-followed
+// names where institutions can't trade size. Universe rebuilt around
+// $200M-$2B band with active catalyst flow.
+// See edgelog-strategy.md.
 
 const FINNHUB = "https://finnhub.io/api/v1";
 
-// Curated universe: ~50 liquid large/mid caps across sectors
-// Edit this list to expand coverage. Keep under ~55 to respect rate limits.
+// Curated universe: ~55 liquid small/mid caps across sectors in the
+// $200M-$2B target band. Edit this list to expand coverage.
+// Keep under ~55 to respect rate limits (2 calls/ticker × 60/min cap).
+//
+// Names hovering near the $2B ceiling will get filtered out at scan time
+// when current mcap is re-checked; they stay in the list so they re-enter
+// the band on a pullback.
 const UNIVERSE = [
-  // Mega-cap tech
-  "NVDA", "MSFT", "AAPL", "GOOGL", "META", "AMZN", "AVGO", "TSLA", "ORCL", "CRM",
-  "AMD", "ADBE", "NFLX", "INTC", "QCOM", "TXN", "INTU", "AMAT", "MU", "PANW",
-  // Financials
-  "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "V", "MA", "AXP",
-  // Healthcare
-  "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE", "TMO", "DHR", "ABT", "AMGN",
-  // Consumer / Industrial
-  "WMT", "COST", "HD", "MCD", "NKE", "PEP", "KO", "PG", "CAT", "BA",
-  // Energy / Materials
-  "XOM", "CVX", "COP", "LIN", "FCX",
+  // Industrials / power / defense / infra
+  "AGX", "PRIM", "MYRG", "ROCK", "MLI", "ESE", "MRCY", "KTOS", "AVAV", "POWL",
+  "FIX", "AAON", "ATKR",
+  // Energy / utilities / mining / materials
+  "TALO", "MTDR", "SM", "CIVI", "CDE", "HL", "MP", "HBM", "ERO", "UEC", "DNN",
+  // Healthcare / biotech / health-IT
+  "HIMS", "EVH", "PRVA", "ADUS", "ENSG", "PGNY", "PHR", "DOCS", "HQY",
+  "FOLD", "KRYS",
+  // Tech / software / semis / networking
+  "INTA", "BRZE", "SEMR", "BL", "ALRM", "EXTR", "CIEN", "POWI", "AMBA",
+  // Consumer
+  "BOOT", "BIRK", "CAKE", "BJRI", "BROS", "SG", "FIGS", "VITL", "SMPL",
+  // Financials / fintech / specialty
+  "AX", "PFSI", "VRTS", "BANC",
 ];
 
 type Quote = {
@@ -99,15 +112,21 @@ export async function GET() {
       m["10DayAverageTradingVolume"] || m["3MonthAverageTradingVolume"];
 
     if (!price || !high52) continue;
-    if (price < 10) continue;
+    // v2 gates: price ≥ $5, $200M ≤ mcap ≤ $2B, avg vol ≥ 300K shares
+    if (price < 5) continue;
     // mcap is in millions on Finnhub
-    if (!mcapM || mcapM < 1000) continue;
-    // avg volume is in millions of shares on Finnhub — 500K shares = 0.5
-    if (!avgVol || avgVol < 0.5) continue;
+    if (!mcapM || mcapM < 200 || mcapM > 2000) continue;
+    // avg volume is in millions of shares on Finnhub — 300K shares = 0.3
+    if (!avgVol || avgVol < 0.3) continue;
 
     const pctFromHigh = ((price - high52) / high52) * 100;
     // Within 2% of 52w high
     if (pctFromHigh < -2) continue;
+
+    const mcapDisplay =
+      mcapM >= 1000
+        ? `$${(mcapM / 1000).toFixed(1)}B`
+        : `$${mcapM.toFixed(0)}M`;
 
     candidates.push({
       ticker: r.symbol,
@@ -116,7 +135,7 @@ export async function GET() {
         "52w high": `$${high52.toFixed(2)}`,
         "vs high": `${pctFromHigh >= 0 ? "+" : ""}${pctFromHigh.toFixed(2)}%`,
         "day move": `${q.dp >= 0 ? "+" : ""}${q.dp.toFixed(2)}%`,
-        mcap: `$${(mcapM / 1000).toFixed(1)}B`,
+        mcap: mcapDisplay,
         "avg vol": `${avgVol.toFixed(1)}M`,
       },
     });
