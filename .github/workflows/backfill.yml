@@ -1,0 +1,36 @@
+# Manually-triggered backfill of historical daily bars from Polygon (Massive).
+# Runs on GitHub's free Ubuntu runner. ~55 minute runtime (260 days × 13s pacing).
+#
+# To run: GitHub repo → Actions tab → "Backfill universe" → "Run workflow" button.
+#
+# Once backfill_progress.is_complete = true in Supabase, delete this workflow file
+# from the repo. The daily incremental refresh runs on Vercel Cron instead.
+
+name: Backfill universe
+
+on:
+  workflow_dispatch:  # manual trigger only — never runs automatically
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # safety upper bound (script targets ~55 min)
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm install --no-save tsx @supabase/supabase-js
+
+      - name: Run backfill
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/backfill.ts
