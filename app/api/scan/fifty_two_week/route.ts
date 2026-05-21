@@ -1,39 +1,26 @@
 import { NextResponse } from "next/server";
 
-// 52-week high scanner: uses FMP free tier's biggest gainers screener
-// + 52w high data per ticker. Free tier: 250 calls/day.
-// Alternative path if you'd rather use Finnhub: stock/metric endpoint has 52w high.
-// Going FMP here since it has a direct gainers screener.
+// 52-week high scanner via FMP free tier
+// Endpoints used: /api/v3/gainers (list) + /api/v3/quote/SYM,SYM,... (batch quotes)
+// Both confirmed available on free tier (250 calls/day limit)
 
 const FMP = "https://financialmodelingprep.com/api/v3";
 
-async function fetchJSON<T>(url: string): Promise<T | null> {
+async function fetchAny(url: string): Promise<{ ok: boolean; status: number; data: any; text?: string }> {
   try {
     const r = await fetch(url, { next: { revalidate: 300 } });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
+    const text = await r.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // not JSON
+    }
+    return { ok: r.ok, status: r.status, data, text };
+  } catch (e: any) {
+    return { ok: false, status: 0, data: null, text: e?.message || "fetch failed" };
   }
 }
-
-type Gainer = {
-  symbol: string;
-  name: string;
-  change: number;
-  price: number;
-  changesPercentage: number;
-};
-
-type Quote = {
-  symbol: string;
-  price: number;
-  yearHigh: number;
-  yearLow: number;
-  marketCap: number;
-  avgVolume: number;
-  volume: number;
-};
 
 export async function GET() {
   const key = process.env.FMP_API_KEY;
@@ -44,62 +31,115 @@ export async function GET() {
     );
   }
 
-  // Get a broad list to filter — use gainers as a proxy for "moved up recently"
-  const gainers = await fetchJSON<Gainer[]>(
-    `${FMP}/gainers?apikey=${key}`
-  );
+  // Step 1: get gainers list
+  const gainersRes = await fetchAny(`${FMP}/gainers?apikey=${key}`);
 
-  if (!gainers || !Array.isArray(gainers)) {
+  if (!gainersRes.ok) {
     return NextResponse.json(
-      { error: "Failed to load market data" },
+      {
+        error: `FMP gainers endpoint returned ${gainersRes.status}`,
+        detail: gainersRes.text?.slice(0, 200),
+      },
       { status: 502 }
     );
   }
 
-  // Limit symbols to check (free tier)
-  const symbols = gainers.slice(0, 30).map((g) => g.symbol);
+  // FMP can return either an array directly OR an object with an error/message
+  const gainersList = Array.isArray(gainersRes.data)
+    ? gainersRes.data
+    : Array.isArray(gainersRes.data?.gainers)
+    ? gainersRes.data.gainers
+    : null;
+
+  if (!gainersList) {
+    return NextResponse.json(
+      {
+        error: "FMP returned unexpected shape from /gainers",
+        detail:
+          typeof gainersRes.data === "object"
+            ? JSON.stringify(gainersRes.data).slice(0, 200)
+            : String(gainersRes.text).slice(0, 200),
+      },
+      { status: 502 }
+    );
+  }
+
+  if (gainersList.length === 0) {
+    return NextResponse.json({ candidates: [] });
+  }
+
+  // Step 2: batch-quote the top gainers
+  const symbols = gainersList
+    .slice(0, 30)
+    .map((g: any) => g.symbol)
+    .filter(Boolean);
+
   if (symbols.length === 0) {
     return NextResponse.json({ candidates: [] });
   }
 
-  const quotes = await fetchJSON<Quote[]>(
+  const quotesRes = await fetchAny(
     `${FMP}/quote/${symbols.join(",")}?apikey=${key}`
   );
 
-  if (!quotes) {
-    return NextResponse.json({ candidates: [] });
+  if (!quotesRes.ok) {
+    return NextResponse.json(
+      {
+        error: `FMP quote endpoint returned ${quotesRes.status}`,
+        detail: quotesRes.text?.slice(0, 200),
+      },
+      { status: 502 }
+    );
   }
 
+  const quotes = Array.isArray(quotesRes.data) ? quotesRes.data : null;
+  if (!quotes) {
+    return NextResponse.json(
+      {
+        error: "FMP returned unexpected shape from /quote",
+        detail: String(quotesRes.text).slice(0, 200),
+      },
+      { status: 502 }
+    );
+  }
+
+  // Step 3: filter and shape
   const candidates: any[] = [];
   for (const q of quotes) {
-    // Gate: at or above 52w high, price >= $10, mcap >= $1B
-    if (!q.yearHigh || !q.price) continue;
-    if (q.price < 10) continue;
-    if (q.marketCap < 1_000_000_000) continue;
-    if (q.avgVolume < 500_000) continue;
+    const price = Number(q?.price);
+    const yearHigh = Number(q?.yearHigh);
+    const marketCap = Number(q?.marketCap);
+    const avgVolume = Number(q?.avgVolume);
+    const volume = Number(q?.volume);
 
-    const pctFromHigh = ((q.price - q.yearHigh) / q.yearHigh) * 100;
-    // At or within 1% of 52w high counts as "broke" (covers fresh breakouts)
-    if (pctFromHigh < -1) continue;
+    if (!price || !yearHigh) continue;
+    if (price < 10) continue;
+    if (!marketCap || marketCap < 1_000_000_000) continue;
+    if (!avgVolume || avgVolume < 500_000) continue;
 
-    const volRatio = q.volume / q.avgVolume;
+    const pctFromHigh = ((price - yearHigh) / yearHigh) * 100;
+    // Loose gate: within 2% of 52w high (above OR just below — covers fresh breaks)
+    if (pctFromHigh < -2) continue;
+
+    const volRatio = volume > 0 && avgVolume > 0 ? volume / avgVolume : 0;
 
     candidates.push({
       ticker: q.symbol,
       meta: {
-        "price": `$${q.price.toFixed(2)}`,
-        "52w high": `$${q.yearHigh.toFixed(2)}`,
+        price: `$${price.toFixed(2)}`,
+        "52w high": `$${yearHigh.toFixed(2)}`,
         "vs high": `${pctFromHigh >= 0 ? "+" : ""}${pctFromHigh.toFixed(2)}%`,
-        "vol vs avg": `${volRatio.toFixed(2)}x`,
-        "mcap": `$${(q.marketCap / 1e9).toFixed(1)}B`,
+        "vol vs avg": volRatio > 0 ? `${volRatio.toFixed(2)}x` : "n/a",
+        mcap: `$${(marketCap / 1e9).toFixed(1)}B`,
       },
     });
   }
 
-  candidates.sort(
-    (a, b) =>
-      parseFloat(b.meta["vol vs avg"]) - parseFloat(a.meta["vol vs avg"])
-  );
+  candidates.sort((a, b) => {
+    const av = parseFloat(a.meta["vol vs avg"]) || 0;
+    const bv = parseFloat(b.meta["vol vs avg"]) || 0;
+    return bv - av;
+  });
 
   return NextResponse.json({ candidates });
 }
