@@ -46,7 +46,7 @@ export async function GET() {
 
   // Get a broad list to filter — use gainers as a proxy for "moved up recently"
   const gainers = await fetchJSON<Gainer[]>(
-    `${FMP}/stock_market/gainers?apikey=${key}`
+    `${FMP}/gainers?apikey=${key}`
   );
 
   if (!gainers || !Array.isArray(gainers)) {
