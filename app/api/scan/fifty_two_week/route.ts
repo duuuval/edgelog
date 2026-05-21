@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
-// 52-week high scanner via FMP free tier
-// Endpoints used: /api/v3/gainers (list) + /api/v3/quote/SYM,SYM,... (batch quotes)
-// Both confirmed available on free tier (250 calls/day limit)
+// 52-week high scanner via FMP /stable/ endpoints (current API as of 2026)
+// Free tier: 250 calls/day, /stable/biggest-gainers + /stable/batch-quote accessible
 
-const FMP = "https://financialmodelingprep.com/api/v3";
+const FMP = "https://financialmodelingprep.com/stable";
 
-async function fetchAny(url: string): Promise<{ ok: boolean; status: number; data: any; text?: string }> {
+async function fetchAny(url: string): Promise<{
+  ok: boolean;
+  status: number;
+  data: any;
+  text?: string;
+}> {
   try {
     const r = await fetch(url, { next: { revalidate: 300 } });
     const text = await r.text();
@@ -31,34 +35,28 @@ export async function GET() {
     );
   }
 
-  // Step 1: get gainers list
-  const gainersRes = await fetchAny(`${FMP}/gainers?apikey=${key}`);
+  // Step 1: biggest gainers
+  const gainersRes = await fetchAny(`${FMP}/biggest-gainers?apikey=${key}`);
 
   if (!gainersRes.ok) {
     return NextResponse.json(
       {
-        error: `FMP gainers endpoint returned ${gainersRes.status}`,
-        detail: gainersRes.text?.slice(0, 200),
+        error: `FMP biggest-gainers returned ${gainersRes.status}`,
+        detail: gainersRes.text?.slice(0, 300),
       },
       { status: 502 }
     );
   }
 
-  // FMP can return either an array directly OR an object with an error/message
-  const gainersList = Array.isArray(gainersRes.data)
-    ? gainersRes.data
-    : Array.isArray(gainersRes.data?.gainers)
-    ? gainersRes.data.gainers
-    : null;
-
+  const gainersList = Array.isArray(gainersRes.data) ? gainersRes.data : null;
   if (!gainersList) {
     return NextResponse.json(
       {
-        error: "FMP returned unexpected shape from /gainers",
+        error: "FMP biggest-gainers returned unexpected shape",
         detail:
           typeof gainersRes.data === "object"
-            ? JSON.stringify(gainersRes.data).slice(0, 200)
-            : String(gainersRes.text).slice(0, 200),
+            ? JSON.stringify(gainersRes.data).slice(0, 300)
+            : String(gainersRes.text).slice(0, 300),
       },
       { status: 502 }
     );
@@ -68,7 +66,7 @@ export async function GET() {
     return NextResponse.json({ candidates: [] });
   }
 
-  // Step 2: batch-quote the top gainers
+  // Step 2: batch quote
   const symbols = gainersList
     .slice(0, 30)
     .map((g: any) => g.symbol)
@@ -79,14 +77,14 @@ export async function GET() {
   }
 
   const quotesRes = await fetchAny(
-    `${FMP}/quote/${symbols.join(",")}?apikey=${key}`
+    `${FMP}/batch-quote?symbols=${symbols.join(",")}&apikey=${key}`
   );
 
   if (!quotesRes.ok) {
     return NextResponse.json(
       {
-        error: `FMP quote endpoint returned ${quotesRes.status}`,
-        detail: quotesRes.text?.slice(0, 200),
+        error: `FMP batch-quote returned ${quotesRes.status}`,
+        detail: quotesRes.text?.slice(0, 300),
       },
       { status: 502 }
     );
@@ -96,8 +94,8 @@ export async function GET() {
   if (!quotes) {
     return NextResponse.json(
       {
-        error: "FMP returned unexpected shape from /quote",
-        detail: String(quotesRes.text).slice(0, 200),
+        error: "FMP batch-quote returned unexpected shape",
+        detail: String(quotesRes.text).slice(0, 300),
       },
       { status: 502 }
     );
@@ -118,7 +116,7 @@ export async function GET() {
     if (!avgVolume || avgVolume < 500_000) continue;
 
     const pctFromHigh = ((price - yearHigh) / yearHigh) * 100;
-    // Loose gate: within 2% of 52w high (above OR just below — covers fresh breaks)
+    // Loose gate: within 2% of 52w high (above OR just below)
     if (pctFromHigh < -2) continue;
 
     const volRatio = volume > 0 && avgVolume > 0 ? volume / avgVolume : 0;
