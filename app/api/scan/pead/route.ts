@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 // PEAD scanner: companies that reported in last 3 trading days,
 // beat both EPS and revenue, with strong reaction.
 // Uses Finnhub free tier. Free tier limits: 60 calls/min.
+//
+// v2: small-cap pivot. PEAD on large-caps was arbitraged away ~2006
+// (Martineau 2022). Edge persists in $200M-$2B band where institutions
+// can't trade size. See edgelog-strategy.md.
 
 const FINNHUB = "https://finnhub.io/api/v1";
 
@@ -73,8 +77,9 @@ export async function GET() {
     return epsBeat && revBeat;
   });
 
-  // Cap to avoid hammering free tier
-  const sliced = beats.slice(0, 25);
+  // Cap to avoid hammering free tier. Small-cap universe is larger,
+  // so widen slightly to catch more candidates inside the band.
+  const sliced = beats.slice(0, 40);
 
   const candidates: any[] = [];
   for (const r of sliced) {
@@ -86,10 +91,11 @@ export async function GET() {
     ]);
     if (!quote || !profile) continue;
 
-    // Gate: market cap >= $1B, price >= $10, reaction >= 5%
-    const mcapB = profile.marketCapitalization / 1000; // Finnhub returns in millions
-    if (mcapB < 1) continue;
-    if (quote.c < 10) continue;
+    // v2 gates: $200M ≤ mcap ≤ $2B, price ≥ $5, reaction ≥ 5%
+    const mcapM = profile.marketCapitalization; // Finnhub returns in millions
+    if (mcapM < 200) continue;       // floor: $200M
+    if (mcapM > 2000) continue;      // ceiling: $2B (institutional-blind-spot band)
+    if (quote.c < 5) continue;       // price floor lowered to $5 for small-cap reality
     if (Math.abs(quote.dp) < 5) continue;
 
     const epsSurprise =
@@ -101,13 +107,18 @@ export async function GET() {
         ? ((r.revenueActual! - r.revenueEstimate) / Math.abs(r.revenueEstimate)) * 100
         : 0;
 
+    const mcapDisplay =
+      mcapM >= 1000
+        ? `$${(mcapM / 1000).toFixed(1)}B`
+        : `$${mcapM.toFixed(0)}M`;
+
     candidates.push({
       ticker: r.symbol,
       meta: {
         "reported": r.date,
         "price": `$${quote.c.toFixed(2)}`,
         "day move": `${quote.dp >= 0 ? "+" : ""}${quote.dp.toFixed(1)}%`,
-        "mcap": `$${mcapB.toFixed(1)}B`,
+        "mcap": mcapDisplay,
         "eps surprise": `${epsSurprise >= 0 ? "+" : ""}${epsSurprise.toFixed(0)}%`,
         "rev surprise": `${revSurprise >= 0 ? "+" : ""}${revSurprise.toFixed(1)}%`,
       },
