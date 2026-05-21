@@ -1,0 +1,34 @@
+# Refreshes the ticker_universe table from Polygon's reference endpoint.
+# Used for the initial population (one-time) and weekly refresh going forward.
+#
+# Initial run: manually trigger via Actions tab.
+# Ongoing: optionally schedule weekly (cron), or fold into the daily Vercel cron once it's ready.
+
+name: Refresh ticker universe
+
+on:
+  workflow_dispatch:  # manual trigger only for now
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm install --no-save tsx @supabase/supabase-js
+
+      - name: Refresh ticker universe
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/refresh-ticker-universe.ts
