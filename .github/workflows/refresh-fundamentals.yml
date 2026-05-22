@@ -16,7 +16,7 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # safety upper bound (script targets ~65 min)
+    timeout-minutes: 150  # safety upper bound (script targets ~65 min)
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
