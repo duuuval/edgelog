@@ -82,11 +82,31 @@ export async function GET(request: Request) {
     // until well after market close. Walking back from "now - 1 day" gives us the most
     // recent fully-settled trading day.
     const now = new Date();
-    const yesterday = new Date(now);
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    const targetDate = getMostRecentTradingDay(yesterday);
-    console.log(`[refresh-universe] target date: ${targetDate} (current UTC: ${now.toISOString()})`);
+    const now = new Date();
+    // Compute "yesterday in US/Eastern" — not UTC. Polygon's tape is ET-based.
+    // After market close (4pm ET) but before midnight ET, "yesterday UTC" can still
+    // be "today ET", which Polygon's free tier won't serve.
+    //
+    // Approach: format `now` as an ET date string, then subtract one day.
+    // Intl.DateTimeFormat with America/New_York gives us the correct ET date
+    // regardless of where the Vercel function is running.
+    const etDateParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const etYear = parseInt(etDateParts.find(p => p.type === "year")!.value, 10);
+    const etMonth = parseInt(etDateParts.find(p => p.type === "month")!.value, 10);
+    const etDay = parseInt(etDateParts.find(p => p.type === "day")!.value, 10);
 
+    // Construct yesterday-in-ET as a UTC date (date math is easier in UTC, and
+    // we only care about the y/m/d, not the time of day).
+    const yesterdayET = new Date(Date.UTC(etYear, etMonth - 1, etDay));
+    yesterdayET.setUTCDate(yesterdayET.getUTCDate() - 1);
+
+    const targetDate = getMostRecentTradingDay(yesterdayET);
+    console.log(`[refresh-universe] target date: ${targetDate} (ET today: ${etYear}-${String(etMonth).padStart(2,"0")}-${String(etDay).padStart(2,"0")}, current UTC: ${now.toISOString()})`);
     // If today is a weekend or holiday, the most recent trading day is yesterday or earlier —
     // we may have already processed it. Check before re-fetching.
     const { data: existing } = await supabase
