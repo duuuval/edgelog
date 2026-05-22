@@ -2,10 +2,6 @@
 //
 // DIAGNOSTIC PAGE — not linked from main nav.
 // Visit /diagnostic/edgar manually.
-//
-// Tests whether nano + real 8-K HTML produces better briefs than nano +
-// Finnhub news summaries. Surfaces the 8-K Item codes so we can verify the
-// right filing was picked (Item 2.02 = earnings release).
 
 "use client";
 
@@ -19,8 +15,8 @@ type DiagnosticResponse = {
     cik: string;
     filingDate: string;
     filingUrl: string;
-    pressReleaseUrl: string;
-    pressReleaseHtml: string;
+    documentUrl: string;
+    documentHtml: string;
     htmlLength: number;
     items: string;
     isEarningsFiling: boolean;
@@ -78,9 +74,9 @@ export default function EdgarDiagnosticPage() {
   }
 
   async function copyHtml() {
-    if (!data?.edgar.pressReleaseHtml) return;
+    if (!data?.edgar.documentHtml) return;
     try {
-      await navigator.clipboard.writeText(data.edgar.pressReleaseHtml);
+      await navigator.clipboard.writeText(data.edgar.documentHtml);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -89,8 +85,8 @@ export default function EdgarDiagnosticPage() {
   }
 
   function downloadHtml() {
-    if (!data?.edgar.pressReleaseHtml) return;
-    const blob = new Blob([data.edgar.pressReleaseHtml], { type: "text/html" });
+    if (!data?.edgar.documentHtml) return;
+    const blob = new Blob([data.edgar.documentHtml], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -106,9 +102,9 @@ export default function EdgarDiagnosticPage() {
       <div className="mb-6">
         <h1 className="text-lg font-semibold">EDGAR Brief Diagnostic</h1>
         <p className="mt-1 text-xs text-zinc-500">
-          Fetches the most recent earnings 8-K (Item 2.02) for a ticker. Sends
-          the cleaned HTML to nano with the existing prompt. Download the .html
-          for Gemini comparison.
+          Fetches the most recent earnings 8-K (Item 2.02) for a ticker and
+          sends the primary 8-K document HTML to nano. Download the .html for
+          Gemini comparison.
         </p>
       </div>
 
@@ -173,12 +169,10 @@ export default function EdgarDiagnosticPage() {
               <Row
                 label="8-K Items"
                 value={data.edgar.items || "n/a"}
-                accent={
-                  data.edgar.isEarningsFiling ? "emerald" : "amber"
-                }
+                accent={data.edgar.isEarningsFiling ? "emerald" : "amber"}
               />
               <Row
-                label="Press release HTML"
+                label="Document HTML"
                 value={`${data.edgar.htmlLength.toLocaleString()} chars${
                   data.diagnostics.truncated
                     ? ` (truncated to ${data.diagnostics.char_cap.toLocaleString()} for AI)`
@@ -192,9 +186,7 @@ export default function EdgarDiagnosticPage() {
                     ? "Yes (Item 2.02 present)"
                     : "No — fell back to most recent 8-K"
                 }
-                accent={
-                  data.edgar.isEarningsFiling ? "emerald" : "amber"
-                }
+                accent={data.edgar.isEarningsFiling ? "emerald" : "amber"}
               />
             </dl>
             <div className="mt-3 flex flex-wrap gap-3 text-xs">
@@ -206,23 +198,24 @@ export default function EdgarDiagnosticPage() {
               >
                 View filing →
               </a>
-              {data.edgar.pressReleaseUrl && (
-                <a
-                  href={data.edgar.pressReleaseUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-emerald-400 hover:underline"
-                >
-                  View press release exhibit →
-                </a>
-              )}
+              {data.edgar.documentUrl &&
+                data.edgar.documentUrl !== data.edgar.filingUrl && (
+                  <a
+                    href={data.edgar.documentUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-emerald-400 hover:underline"
+                  >
+                    View 8-K document →
+                  </a>
+                )}
             </div>
           </section>
 
           {/* AI Brief */}
           <section className="rounded-lg border border-zinc-800 p-4">
             <h2 className="mb-3 text-xs uppercase tracking-wide text-zinc-400">
-              gpt-5-nano Brief (with EDGAR HTML input)
+              gpt-5-nano Brief (with EDGAR document input)
             </h2>
             {data.brief ? (
               <div className="space-y-3">
@@ -263,21 +256,21 @@ export default function EdgarDiagnosticPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={downloadHtml}
-                  disabled={!data.edgar.pressReleaseHtml}
+                  disabled={!data.edgar.documentHtml}
                   className="rounded border border-emerald-700 bg-emerald-950/50 px-3 py-1 text-xs text-emerald-300 hover:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Download .html
                 </button>
                 <button
                   onClick={copyHtml}
-                  disabled={!data.edgar.pressReleaseHtml}
+                  disabled={!data.edgar.documentHtml}
                   className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {copied ? "Copied ✓" : "Copy"}
                 </button>
                 <button
                   onClick={() => setShowFullHtml((v) => !v)}
-                  disabled={!data.edgar.pressReleaseHtml}
+                  disabled={!data.edgar.documentHtml}
                   className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {showFullHtml ? "Collapse" : "Expand"}
@@ -285,20 +278,18 @@ export default function EdgarDiagnosticPage() {
               </div>
             </div>
 
-            {data.edgar.pressReleaseHtml ? (
+            {data.edgar.documentHtml ? (
               <pre
                 className={`overflow-auto rounded bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-300 ${
                   showFullHtml ? "max-h-[600px]" : "max-h-40"
                 }`}
               >
-                {data.edgar.pressReleaseHtml}
+                {data.edgar.documentHtml}
               </pre>
             ) : (
               <div className="text-zinc-500">
-                No press release HTML extracted (no recognized exhibit on this
-                filing). Check the &quot;View filing&quot; link above to inspect
-                manually — the press release may be embedded in the main 8-K
-                document rather than as a separate exhibit.
+                No document HTML retrieved. Check the &quot;View filing&quot;
+                link above to inspect manually.
               </div>
             )}
 
