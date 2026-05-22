@@ -1,9 +1,12 @@
 // lib/edgar.ts
 //
 // Minimal SEC EDGAR client for fetching the most recent 8-K press release
-// exhibit text for a given ticker. Used by the diagnostic page to test
-// whether better input data (real 8-K vs Finnhub news summaries) improves
-// AI brief quality.
+// exhibit for a given ticker. Used by the diagnostic page to test whether
+// better input data (real 8-K vs Finnhub news summaries) improves AI brief
+// quality.
+//
+// Returns lightly-cleaned HTML preserving structural tags (tables, headers,
+// paragraphs, lists) — models read structure better than flattened text.
 //
 // EDGAR is free, no API key, ~10 req/sec rate limit.
 // MUST send a User-Agent header with contact info or SEC returns 403.
@@ -33,7 +36,7 @@ export type Edgar8K = {
   cik: string; // 10-digit zero-padded
   companyName: string;
   filing: EdgarFiling;
-  pressReleaseText: string; // plain text, HTML stripped
+  pressReleaseHtml: string; // lightly-cleaned HTML, structure preserved
   pressReleaseUrl: string;
 };
 
@@ -121,11 +124,7 @@ async function fetchLatest8KFiling(cik: string): Promise<EdgarFiling | null> {
   return null;
 }
 
-// ---------- Step 3: fetch the press release exhibit text ----------
-
-// 8-K filings contain the form itself (8-k.htm) plus exhibits.
-// The press release is almost always Exhibit 99.1, filed as ex99*.htm or ex-99*.htm.
-// Strategy: fetch the filing index, find the ex99 exhibit, fetch its HTML.
+// ---------- Step 3: fetch the press release exhibit ----------
 
 type FilingIndex = {
   directory: {
@@ -136,7 +135,7 @@ type FilingIndex = {
 async function fetchPressReleaseExhibit(
   cik: string,
   accessionRaw: string
-): Promise<{ text: string; url: string } | null> {
+): Promise<{ html: string; url: string } | null> {
   const accessionNoDashes = accessionRaw.replace(/-/g, "");
   const indexUrl = `${SEC_BASE}/Archives/edgar/data/${parseInt(cik, 10)}/${accessionNoDashes}/index.json`;
 
@@ -153,7 +152,6 @@ async function fetchPressReleaseExhibit(
   const items = index.directory?.item || [];
 
   // Look for ex99 / ex-99 / exhibit99 .htm files (Exhibit 99.x = press release)
-  // Skip the main 8-k.htm form document.
   const ex99Match = items.find((item) => {
     const n = item.name.toLowerCase();
     return (
@@ -175,41 +173,79 @@ async function fetchPressReleaseExhibit(
     throw new Error(`EDGAR exhibit fetch failed: ${exRes.status}`);
   }
 
-  const html = await exRes.text();
-  return { text: stripHtml(html), url: exhibitUrl };
+  const rawHtml = await exRes.text();
+  return { html: cleanHtml(rawHtml), url: exhibitUrl };
 }
 
-// ---------- HTML → plain text ----------
+// ---------- HTML light cleanup ----------
+//
+// Drop styling/markup noise that costs tokens without carrying meaning;
+// keep all structural information (tables, headers, lists, emphasis).
+//
+// Stripped: <script>, <style>, <link>, <meta>, HTML comments, XBRL inline
+// tagging wrappers (keep content), all attributes except <a href>, <font>
+// tags (keep content), embedded base64 images, <html>/<head>/<body>/<form>
+// wrappers.
+//
+// Kept: <table>, <tr>, <td>, <th>, <h1>-<h6>, <p>, <div>, <span>, <br>,
+// <b>, <strong>, <i>, <em>, <u>, <ul>, <ol>, <li>, <a href="...">.
 
-function stripHtml(html: string): string {
-  return (
-    html
-      // Drop scripts/styles entirely
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      // Convert common block elements to newlines so we don't lose paragraph structure
-      .replace(/<\/(p|div|tr|li|h[1-6]|br)>/gi, "\n")
-      .replace(/<br\s*\/?>/gi, "\n")
-      // Strip all remaining tags
-      .replace(/<[^>]+>/g, " ")
-      // Decode common HTML entities
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#8217;/g, "'")
-      .replace(/&#8220;/g, '"')
-      .replace(/&#8221;/g, '"')
-      .replace(/&#8211;/g, "-")
-      .replace(/&#8212;/g, "—")
-      // Collapse whitespace
-      .replace(/[ \t]+/g, " ")
-      .replace(/\n[ \t]+/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
-  );
+function cleanHtml(html: string): string {
+  let out = html;
+
+  // Strip script/style/link/meta blocks
+  out = out.replace(/<script[\s\S]*?<\/script>/gi, "");
+  out = out.replace(/<style[\s\S]*?<\/style>/gi, "");
+  out = out.replace(/<link\b[^>]*\/?>/gi, "");
+  out = out.replace(/<meta\b[^>]*\/?>/gi, "");
+
+  // Strip HTML comments
+  out = out.replace(/<!--[\s\S]*?-->/g, "");
+
+  // Remove XBRL inline tagging wrappers (keep inner content)
+  out = out.replace(/<\/?ix:[a-z]+[^>]*>/gi, "");
+  out = out.replace(/<\/?xbrli:[a-z]+[^>]*>/gi, "");
+
+  // Strip embedded base64 images
+  out = out.replace(/<img\b[^>]*src=["']data:[^"']*["'][^>]*\/?>/gi, "");
+
+  // Strip <font> tags (keep content)
+  out = out.replace(/<\/?font\b[^>]*>/gi, "");
+
+  // Strip noisy attributes; keep href on <a>
+  out = out.replace(/<([a-z][a-z0-9]*)\b([^>]*)>/gi, (_match, tag, attrs) => {
+    const t = tag.toLowerCase();
+    if (t === "html" || t === "head" || t === "body" || t === "form") return "";
+    if (t === "a") {
+      const hrefMatch = attrs.match(/\bhref=["']([^"']*)["']/i);
+      return hrefMatch ? `<a href="${hrefMatch[1]}">` : `<a>`;
+    }
+    return `<${t}>`;
+  });
+
+  // Strip matching closing wrapper tags
+  out = out.replace(/<\/(html|head|body|form)>/gi, "");
+
+  // Decode common HTML entities
+  out = out
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#8217;/g, "'")
+    .replace(/&#8220;/g, '"')
+    .replace(/&#8221;/g, '"')
+    .replace(/&#8211;/g, "-")
+    .replace(/&#8212;/g, "—");
+
+  // Collapse excess whitespace
+  out = out.replace(/>\s+</g, "><");
+  out = out.replace(/[ \t]{2,}/g, " ");
+  out = out.replace(/\n{3,}/g, "\n\n");
+
+  return out.trim();
 }
 
 // ---------- Public API ----------
@@ -226,13 +262,12 @@ export async function fetchLatest8K(ticker: string): Promise<Edgar8K | null> {
 
   const exhibit = await fetchPressReleaseExhibit(entry.cik, filing.accessionNumber);
   if (!exhibit) {
-    // 8-K exists but no Exhibit 99 press release — return what we have with empty text
     return {
       ticker: upper,
       cik: entry.cik,
       companyName: entry.name,
       filing,
-      pressReleaseText: "",
+      pressReleaseHtml: "",
       pressReleaseUrl: "",
     };
   }
@@ -242,8 +277,7 @@ export async function fetchLatest8K(ticker: string): Promise<Edgar8K | null> {
     cik: entry.cik,
     companyName: entry.name,
     filing,
-    pressReleaseText: exhibit.text,
+    pressReleaseHtml: exhibit.html,
     pressReleaseUrl: exhibit.url,
   };
 }
-
