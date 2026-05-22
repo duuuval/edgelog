@@ -1,14 +1,15 @@
 // app/api/diagnostic/edgar-brief/route.ts
 //
 // DIAGNOSTIC ENDPOINT — not part of production scanner flow.
-// Tests whether feeding the AI a real SEC 8-K press release (instead of
-// Finnhub news summaries) produces better briefs.
+// Tests whether feeding the AI a real SEC 8-K press release (as lightly
+// cleaned HTML, preserving structure) produces better briefs than the
+// Finnhub news summaries the production endpoint uses.
 //
 // GET /api/diagnostic/edgar-brief?ticker=SEMR&strategy=PEAD
 //
-// Returns the raw 8-K text alongside the AI brief so we can:
+// Returns the raw 8-K HTML alongside the AI brief so we can:
 // 1. Verify the input data is what we expect
-// 2. Copy the raw text to test against Gemini Flash/Pro manually
+// 2. Use the same HTML to test against Gemini Flash/Pro manually
 // 3. Compare nano output here vs nano output in the current scanner
 
 import { NextRequest, NextResponse } from "next/server";
@@ -17,6 +18,12 @@ import { Strategy } from "@/lib/playbook";
 import { fetchLatest8K } from "@/lib/edgar";
 
 const OPENAI = "https://api.openai.com/v1/chat/completions";
+
+// Cap on EDGAR HTML chars sent to nano.
+// 200k chars ≈ ~50k tokens. Real cleaned 8-Ks are typically 20-80k chars.
+// Outliers (full transcript attachments) can hit 150k+. Input tokens are
+// cheap (~$0.05/M) so the binding constraint is nano's context window, not cost.
+const EDGAR_CHAR_CAP = 200_000;
 
 export async function GET(req: NextRequest) {
   const openaiKey = process.env.OPENAI_API_KEY;
@@ -57,23 +64,22 @@ export async function GET(req: NextRequest) {
   }
 
   // ---------- 2. Build the edgarContext string ----------
-  // Mirrors the shape of newsContext in the existing endpoint so buildPrompt
-  // doesn't need to know the source changed.
 
   let edgarContext: string;
-  if (!edgar.pressReleaseText) {
+  if (!edgar.pressReleaseHtml) {
     edgarContext = `(Latest 8-K filed ${edgar.filing.filingDate} for ${edgar.companyName}, but no Exhibit 99 press release was attached. Brief should reflect this gap.)`;
   } else {
-    // Cap at ~30k chars (~7-8k tokens) to stay well under nano's context window
-    // and avoid runaway costs. Real 8-K press releases are typically 5-15k chars.
-    const capped = edgar.pressReleaseText.slice(0, 30000);
-    const truncated = edgar.pressReleaseText.length > 30000;
+    const capped = edgar.pressReleaseHtml.slice(0, EDGAR_CHAR_CAP);
+    const truncated = edgar.pressReleaseHtml.length > EDGAR_CHAR_CAP;
 
     edgarContext = `SOURCE: SEC EDGAR 8-K filing for ${edgar.companyName} (CIK ${edgar.cik})
 FILED: ${edgar.filing.filingDate}
 URL: ${edgar.pressReleaseUrl}
 
---- PRESS RELEASE TEXT (Exhibit 99) ---
+The content below is the press release exhibit (Exhibit 99) as cleaned HTML.
+Structural tags (tables, headers, lists, emphasis) are preserved.
+
+--- PRESS RELEASE HTML ---
 
 ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
   }
@@ -84,10 +90,10 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
     ticker,
     strategy,
     metaSnapshot: { source: "diagnostic-edgar" },
-    newsContext: edgarContext, // <-- swapped: 8-K text in place of Finnhub news
+    newsContext: edgarContext,
   });
 
-  // ---------- 4. Call nano (same params as production endpoint) ----------
+  // ---------- 4. Call nano ----------
 
   const t0 = Date.now();
   const aiRes = await fetch(OPENAI, {
@@ -117,7 +123,7 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
           filingDate: edgar.filing.filingDate,
           filingUrl: edgar.filing.filingUrl,
           pressReleaseUrl: edgar.pressReleaseUrl,
-          rawTextLength: edgar.pressReleaseText.length,
+          htmlLength: edgar.pressReleaseHtml.length,
         },
       },
       { status: 502 }
@@ -132,7 +138,7 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
   try {
     parsed = JSON.parse(rawContent);
   } catch {
-    // fall through, return raw
+    // fall through
   }
 
   return NextResponse.json({
@@ -144,8 +150,8 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
       filingDate: edgar.filing.filingDate,
       filingUrl: edgar.filing.filingUrl,
       pressReleaseUrl: edgar.pressReleaseUrl,
-      pressReleaseText: edgar.pressReleaseText, // full text — UI shows truncated, copy gets full
-      pressReleaseLength: edgar.pressReleaseText.length,
+      pressReleaseHtml: edgar.pressReleaseHtml,
+      htmlLength: edgar.pressReleaseHtml.length,
     },
     brief: parsed
       ? {
@@ -153,13 +159,13 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
           generated_at: new Date().toISOString(),
         }
       : null,
-    rawAiContent: parsed ? null : rawContent, // surface if JSON parse fails
+    rawAiContent: parsed ? null : rawContent,
     diagnostics: {
       ai_latency_ms: aiMs,
       tokens: usage,
       edgar_context_chars: edgarContext.length,
-      truncated: edgar.pressReleaseText.length > 30000,
+      truncated: edgar.pressReleaseHtml.length > EDGAR_CHAR_CAP,
+      char_cap: EDGAR_CHAR_CAP,
     },
   });
 }
-
