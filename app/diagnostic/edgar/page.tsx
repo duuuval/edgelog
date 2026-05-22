@@ -4,8 +4,8 @@
 // Visit /diagnostic/edgar manually.
 //
 // Tests whether nano + real 8-K HTML produces better briefs than nano +
-// Finnhub news summaries. Also surfaces the raw HTML for uploading to
-// Gemini Flash / Pro for a 3-way model comparison.
+// Finnhub news summaries. Surfaces the 8-K Item codes so we can verify the
+// right filing was picked (Item 2.02 = earnings release).
 
 "use client";
 
@@ -22,6 +22,8 @@ type DiagnosticResponse = {
     pressReleaseUrl: string;
     pressReleaseHtml: string;
     htmlLength: number;
+    items: string;
+    isEarningsFiling: boolean;
   };
   brief: {
     sections: { label: string; value: string }[];
@@ -104,9 +106,9 @@ export default function EdgarDiagnosticPage() {
       <div className="mb-6">
         <h1 className="text-lg font-semibold">EDGAR Brief Diagnostic</h1>
         <p className="mt-1 text-xs text-zinc-500">
-          Fetch the latest 8-K for a ticker, send the cleaned HTML to nano with
-          the existing prompt. Use the download button to upload the same HTML
-          into Gemini app for comparison.
+          Fetches the most recent earnings 8-K (Item 2.02) for a ticker. Sends
+          the cleaned HTML to nano with the existing prompt. Download the .html
+          for Gemini comparison.
         </p>
       </div>
 
@@ -169,12 +171,30 @@ export default function EdgarDiagnosticPage() {
               <Row label="CIK" value={data.edgar.cik} />
               <Row label="Filed" value={data.edgar.filingDate} />
               <Row
+                label="8-K Items"
+                value={data.edgar.items || "n/a"}
+                accent={
+                  data.edgar.isEarningsFiling ? "emerald" : "amber"
+                }
+              />
+              <Row
                 label="Press release HTML"
                 value={`${data.edgar.htmlLength.toLocaleString()} chars${
                   data.diagnostics.truncated
                     ? ` (truncated to ${data.diagnostics.char_cap.toLocaleString()} for AI)`
                     : ""
                 }`}
+              />
+              <Row
+                label="Earnings filing?"
+                value={
+                  data.edgar.isEarningsFiling
+                    ? "Yes (Item 2.02 present)"
+                    : "No — fell back to most recent 8-K"
+                }
+                accent={
+                  data.edgar.isEarningsFiling ? "emerald" : "amber"
+                }
               />
             </dl>
             <div className="mt-3 flex flex-wrap gap-3 text-xs">
@@ -243,19 +263,22 @@ export default function EdgarDiagnosticPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={downloadHtml}
-                  className="rounded border border-emerald-700 bg-emerald-950/50 px-3 py-1 text-xs text-emerald-300 hover:border-emerald-500"
+                  disabled={!data.edgar.pressReleaseHtml}
+                  className="rounded border border-emerald-700 bg-emerald-950/50 px-3 py-1 text-xs text-emerald-300 hover:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Download .html
                 </button>
                 <button
                   onClick={copyHtml}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500"
+                  disabled={!data.edgar.pressReleaseHtml}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {copied ? "Copied ✓" : "Copy"}
                 </button>
                 <button
                   onClick={() => setShowFullHtml((v) => !v)}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500"
+                  disabled={!data.edgar.pressReleaseHtml}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {showFullHtml ? "Collapse" : "Expand"}
                 </button>
@@ -272,14 +295,18 @@ export default function EdgarDiagnosticPage() {
               </pre>
             ) : (
               <div className="text-zinc-500">
-                No press release HTML extracted (8-K had no Exhibit 99 attached).
+                No press release HTML extracted (no recognized exhibit on this
+                filing). Check the &quot;View filing&quot; link above to inspect
+                manually — the press release may be embedded in the main 8-K
+                document rather than as a separate exhibit.
               </div>
             )}
 
             <p className="mt-3 text-xs text-zinc-500">
-              Download the .html file and upload it into Gemini app on Flash,
-              then Pro. Compare the 5-section outputs against the brief above
-              and your own read of the filing.
+              Download the .html and upload to the Gemini app for comparison.
+              Use the constrained prompt: tell Gemini to use ONLY information
+              from the attached file and answer &quot;Not disclosed in
+              filing&quot; for anything not present.
             </p>
           </section>
         </div>
@@ -288,11 +315,25 @@ export default function EdgarDiagnosticPage() {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: "emerald" | "amber";
+}) {
+  const valueClass =
+    accent === "emerald"
+      ? "text-emerald-300"
+      : accent === "amber"
+      ? "text-amber-300"
+      : "text-zinc-200";
   return (
     <div className="flex flex-col">
       <dt className="text-xs text-zinc-500">{label}</dt>
-      <dd className="text-zinc-200">{value}</dd>
+      <dd className={valueClass}>{value}</dd>
     </div>
   );
 }
