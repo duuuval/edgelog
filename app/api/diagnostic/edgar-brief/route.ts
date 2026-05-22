@@ -1,15 +1,10 @@
 // app/api/diagnostic/edgar-brief/route.ts
 //
 // DIAGNOSTIC ENDPOINT — not part of production scanner flow.
-// Tests whether feeding the AI a real SEC 8-K press release produces better
+// Tests whether feeding the AI the primary 8-K document produces better
 // briefs than the Finnhub news summaries the production endpoint uses.
 //
 // GET /api/diagnostic/edgar-brief?ticker=SEMR&strategy=PEAD
-//
-// Returns the raw 8-K HTML alongside the AI brief so we can:
-// 1. Verify the input data is what we expect (incl. which 8-K Item was picked)
-// 2. Use the same HTML to test against Gemini Flash/Pro manually
-// 3. Compare nano output here vs nano output in the current scanner
 
 import { NextRequest, NextResponse } from "next/server";
 import { buildPrompt } from "@/lib/prompts";
@@ -18,10 +13,6 @@ import { fetchLatest8K } from "@/lib/edgar";
 
 const OPENAI = "https://api.openai.com/v1/chat/completions";
 
-// Cap on EDGAR HTML chars sent to nano.
-// 200k chars ≈ ~50k tokens. Cleaned 8-Ks are typically 20-80k chars; outliers
-// hit 150k+. Input tokens are cheap (~$0.05/M) so the binding constraint is
-// nano's context window, not cost.
 const EDGAR_CHAR_CAP = 200_000;
 
 export async function GET(req: NextRequest) {
@@ -65,21 +56,22 @@ export async function GET(req: NextRequest) {
   // ---------- 2. Build the edgarContext string ----------
 
   let edgarContext: string;
-  if (!edgar.pressReleaseHtml) {
-    edgarContext = `(8-K filed ${edgar.filing.filingDate} for ${edgar.companyName} (Items: ${edgar.filing.items || "n/a"}), but no recognizable press release exhibit was attached. Brief should reflect this gap.)`;
+  if (!edgar.documentHtml) {
+    edgarContext = `(8-K filed ${edgar.filing.filingDate} for ${edgar.companyName} (Items: ${edgar.filing.items || "n/a"}), but document fetch failed. Brief should reflect this gap.)`;
   } else {
-    const capped = edgar.pressReleaseHtml.slice(0, EDGAR_CHAR_CAP);
-    const truncated = edgar.pressReleaseHtml.length > EDGAR_CHAR_CAP;
+    const capped = edgar.documentHtml.slice(0, EDGAR_CHAR_CAP);
+    const truncated = edgar.documentHtml.length > EDGAR_CHAR_CAP;
 
     edgarContext = `SOURCE: SEC EDGAR 8-K filing for ${edgar.companyName} (CIK ${edgar.cik})
 FILED: ${edgar.filing.filingDate}
 8-K ITEMS: ${edgar.filing.items || "n/a"}${edgar.filing.isEarningsFiling ? " (includes Item 2.02 — Results of Operations)" : " (NOTE: no Item 2.02 — this may not be an earnings filing)"}
-URL: ${edgar.pressReleaseUrl}
+URL: ${edgar.documentUrl}
 
-The content below is the press release exhibit as cleaned HTML.
-Structural tags (tables, headers, lists, emphasis) are preserved.
+The content below is the primary 8-K document as cleaned HTML.
+This is the form itself, which under Item 2.02 is required to disclose results
+of operations. Separate Exhibit 99 press releases (if any) are not included.
 
---- PRESS RELEASE HTML ---
+--- 8-K DOCUMENT HTML ---
 
 ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
   }
@@ -122,8 +114,8 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
           companyName: edgar.companyName,
           filingDate: edgar.filing.filingDate,
           filingUrl: edgar.filing.filingUrl,
-          pressReleaseUrl: edgar.pressReleaseUrl,
-          htmlLength: edgar.pressReleaseHtml.length,
+          documentUrl: edgar.documentUrl,
+          htmlLength: edgar.documentHtml.length,
           items: edgar.filing.items,
           isEarningsFiling: edgar.filing.isEarningsFiling,
         },
@@ -151,9 +143,9 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
       cik: edgar.cik,
       filingDate: edgar.filing.filingDate,
       filingUrl: edgar.filing.filingUrl,
-      pressReleaseUrl: edgar.pressReleaseUrl,
-      pressReleaseHtml: edgar.pressReleaseHtml,
-      htmlLength: edgar.pressReleaseHtml.length,
+      documentUrl: edgar.documentUrl,
+      documentHtml: edgar.documentHtml,
+      htmlLength: edgar.documentHtml.length,
       items: edgar.filing.items,
       isEarningsFiling: edgar.filing.isEarningsFiling,
     },
@@ -168,7 +160,7 @@ ${capped}${truncated ? "\n\n[...truncated]" : ""}`;
       ai_latency_ms: aiMs,
       tokens: usage,
       edgar_context_chars: edgarContext.length,
-      truncated: edgar.pressReleaseHtml.length > EDGAR_CHAR_CAP,
+      truncated: edgar.documentHtml.length > EDGAR_CHAR_CAP,
       char_cap: EDGAR_CHAR_CAP,
     },
   });
