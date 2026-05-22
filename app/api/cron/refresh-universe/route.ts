@@ -78,9 +78,14 @@ export async function GET(request: Request) {
 
   try {
     // 1. Determine target date
+    // Always target yesterday or earlier — Polygon free tier doesn't serve same-day data
+    // until well after market close. Walking back from "now - 1 day" gives us the most
+    // recent fully-settled trading day.
     const now = new Date();
-    const targetDate = getMostRecentTradingDay(now);
-    console.log(`[refresh-universe] target date: ${targetDate}`);
+    const yesterday = new Date(now);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const targetDate = getMostRecentTradingDay(yesterday);
+    console.log(`[refresh-universe] target date: ${targetDate} (current UTC: ${now.toISOString()})`);
 
     // If today is a weekend or holiday, the most recent trading day is yesterday or earlier —
     // we may have already processed it. Check before re-fetching.
