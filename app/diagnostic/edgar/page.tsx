@@ -3,9 +3,9 @@
 // DIAGNOSTIC PAGE — not linked from main nav.
 // Visit /diagnostic/edgar manually.
 //
-// Purpose: test whether nano + real 8-K text produces better briefs than
-// nano + Finnhub news summaries. Also surfaces the raw 8-K text for
-// pasting into Gemini Flash / Pro for a 3-way model comparison.
+// Tests whether nano + real 8-K HTML produces better briefs than nano +
+// Finnhub news summaries. Also surfaces the raw HTML for uploading to
+// Gemini Flash / Pro for a 3-way model comparison.
 
 "use client";
 
@@ -20,8 +20,8 @@ type DiagnosticResponse = {
     filingDate: string;
     filingUrl: string;
     pressReleaseUrl: string;
-    pressReleaseText: string;
-    pressReleaseLength: number;
+    pressReleaseHtml: string;
+    htmlLength: number;
   };
   brief: {
     sections: { label: string; value: string }[];
@@ -30,9 +30,14 @@ type DiagnosticResponse = {
   rawAiContent: string | null;
   diagnostics: {
     ai_latency_ms: number;
-    tokens: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+    tokens: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    } | null;
     edgar_context_chars: number;
     truncated: boolean;
+    char_cap: number;
   };
 };
 
@@ -42,7 +47,7 @@ export default function EdgarDiagnosticPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DiagnosticResponse | null>(null);
-  const [showFullText, setShowFullText] = useState(false);
+  const [showFullHtml, setShowFullHtml] = useState(false);
   const [copied, setCopied] = useState(false);
 
   async function run() {
@@ -50,7 +55,7 @@ export default function EdgarDiagnosticPage() {
     setLoading(true);
     setError(null);
     setData(null);
-    setShowFullText(false);
+    setShowFullHtml(false);
     setCopied(false);
 
     try {
@@ -70,16 +75,28 @@ export default function EdgarDiagnosticPage() {
     }
   }
 
-  async function copyRawText() {
-    if (!data?.edgar.pressReleaseText) return;
+  async function copyHtml() {
+    if (!data?.edgar.pressReleaseHtml) return;
     try {
-      await navigator.clipboard.writeText(data.edgar.pressReleaseText);
+      await navigator.clipboard.writeText(data.edgar.pressReleaseHtml);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard API can fail in some browsers/contexts
-      setError("Copy failed — select text manually");
+      setError("Copy failed — try downloading instead");
     }
+  }
+
+  function downloadHtml() {
+    if (!data?.edgar.pressReleaseHtml) return;
+    const blob = new Blob([data.edgar.pressReleaseHtml], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${data.ticker}_8K_${data.edgar.filingDate}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -87,9 +104,9 @@ export default function EdgarDiagnosticPage() {
       <div className="mb-6">
         <h1 className="text-lg font-semibold">EDGAR Brief Diagnostic</h1>
         <p className="mt-1 text-xs text-zinc-500">
-          Fetch the most recent 8-K for a ticker, feed the press release text
-          (instead of Finnhub news) into nano with the existing prompt. Use the
-          raw text to compare against Gemini Flash / Pro.
+          Fetch the latest 8-K for a ticker, send the cleaned HTML to nano with
+          the existing prompt. Use the download button to upload the same HTML
+          into Gemini app for comparison.
         </p>
       </div>
 
@@ -152,9 +169,11 @@ export default function EdgarDiagnosticPage() {
               <Row label="CIK" value={data.edgar.cik} />
               <Row label="Filed" value={data.edgar.filingDate} />
               <Row
-                label="Press release"
-                value={`${data.edgar.pressReleaseLength.toLocaleString()} chars${
-                  data.diagnostics.truncated ? " (truncated to 30k for AI)" : ""
+                label="Press release HTML"
+                value={`${data.edgar.htmlLength.toLocaleString()} chars${
+                  data.diagnostics.truncated
+                    ? ` (truncated to ${data.diagnostics.char_cap.toLocaleString()} for AI)`
+                    : ""
                 }`}
               />
             </dl>
@@ -183,7 +202,7 @@ export default function EdgarDiagnosticPage() {
           {/* AI Brief */}
           <section className="rounded-lg border border-zinc-800 p-4">
             <h2 className="mb-3 text-xs uppercase tracking-wide text-zinc-400">
-              gpt-5-nano Brief (with EDGAR input)
+              gpt-5-nano Brief (with EDGAR HTML input)
             </h2>
             {data.brief ? (
               <div className="space-y-3">
@@ -215,46 +234,52 @@ export default function EdgarDiagnosticPage() {
             </div>
           </section>
 
-          {/* Raw text for Gemini comparison */}
+          {/* HTML for Gemini comparison */}
           <section className="rounded-lg border border-zinc-800 p-4">
             <div className="mb-3 flex items-center justify-between gap-2">
               <h2 className="text-xs uppercase tracking-wide text-zinc-400">
-                Raw 8-K Text
+                Cleaned 8-K HTML
               </h2>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={copyRawText}
-                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500"
+                  onClick={downloadHtml}
+                  className="rounded border border-emerald-700 bg-emerald-950/50 px-3 py-1 text-xs text-emerald-300 hover:border-emerald-500"
                 >
-                  {copied ? "Copied ✓" : "Copy for Gemini"}
+                  Download .html
                 </button>
                 <button
-                  onClick={() => setShowFullText((v) => !v)}
+                  onClick={copyHtml}
                   className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500"
                 >
-                  {showFullText ? "Collapse" : "Expand"}
+                  {copied ? "Copied ✓" : "Copy"}
+                </button>
+                <button
+                  onClick={() => setShowFullHtml((v) => !v)}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs hover:border-zinc-500"
+                >
+                  {showFullHtml ? "Collapse" : "Expand"}
                 </button>
               </div>
             </div>
 
-            {data.edgar.pressReleaseText ? (
+            {data.edgar.pressReleaseHtml ? (
               <pre
                 className={`overflow-auto rounded bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-300 ${
-                  showFullText ? "max-h-[600px]" : "max-h-40"
+                  showFullHtml ? "max-h-[600px]" : "max-h-40"
                 }`}
               >
-                {data.edgar.pressReleaseText}
+                {data.edgar.pressReleaseHtml}
               </pre>
             ) : (
               <div className="text-zinc-500">
-                No press release text extracted (8-K had no Exhibit 99 attached).
+                No press release HTML extracted (8-K had no Exhibit 99 attached).
               </div>
             )}
 
             <p className="mt-3 text-xs text-zinc-500">
-              Paste this into the Gemini app on Flash, then Pro, with the same
-              prompt structure. Compare the 5-section outputs against the brief
-              above and against your own read of the filing.
+              Download the .html file and upload it into Gemini app on Flash,
+              then Pro. Compare the 5-section outputs against the brief above
+              and your own read of the filing.
             </p>
           </section>
         </div>
@@ -271,4 +296,3 @@ function Row({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
