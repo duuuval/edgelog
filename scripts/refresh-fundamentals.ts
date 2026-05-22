@@ -1,8 +1,11 @@
 // Refreshes ticker_universe.market_cap from Finnhub /stock/profile2.
-// Run weekly via GitHub Actions. ~65 min runtime (paced 1/sec to stay under Finnhub's 60/min limit).
+// Run weekly via GitHub Actions. ~100 min runtime for full universe (paced 1.1s/call to stay under Finnhub's 60/min limit).
 //
 // Resumable: re-running picks up by updating any ticker whose updated_at is older than 6 days,
 // so a crash mid-run doesn't waste hours re-fetching tickers we already have.
+//
+// IMPORTANT: Supabase JS client caps .select() at 1000 rows by default. We paginate explicitly
+// in getTickersToRefresh() to retrieve the full universe.
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -10,6 +13,7 @@ import { createClient } from "@supabase/supabase-js";
 const PACE_MS = 1100;  // 1.1s between Finnhub calls (~55/min, safely under 60/min limit)
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const STALENESS_THRESHOLD_DAYS = 6;  // re-fetch tickers updated more than 6 days ago
+const PAGE_SIZE = 1000;  // Supabase default row limit per .select() call
 
 // --- Env ---
 function requireEnv(name: string): string {
@@ -66,22 +70,42 @@ async function fetchProfile(ticker: string): Promise<FinnhubProfile | null> {
 }
 
 // --- DB ---
+type TickerRow = {
+  ticker: string;
+  updated_at: string;
+  market_cap: number | null;
+};
+
 async function getTickersToRefresh(): Promise<string[]> {
   // Pull active tickers updated more than STALENESS_THRESHOLD_DAYS ago (or never).
-  // Order by ticker for deterministic resume behavior.
+  // Supabase JS client caps .select() at 1000 rows by default, so we paginate.
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - STALENESS_THRESHOLD_DAYS);
 
-  const { data, error } = await supabase
-    .from("ticker_universe")
-    .select("ticker, updated_at, market_cap")
-    .eq("active", true)
-    .order("ticker", { ascending: true });
+  const allRows: TickerRow[] = [];
+  let from = 0;
 
-  if (error) throw new Error(`fetch tickers: ${error.message}`);
+  while (true) {
+    const { data, error } = await supabase
+      .from("ticker_universe")
+      .select("ticker, updated_at, market_cap")
+      .eq("active", true)
+      .order("ticker", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) throw new Error(`fetch tickers (page from ${from}): ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    allRows.push(...(data as TickerRow[]));
+
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+
+  console.log(`[fundamentals] retrieved ${allRows.length} total active tickers from DB`);
 
   // Filter to stale or unset market_cap
-  const filtered = (data ?? []).filter((row) => {
+  const filtered = allRows.filter((row) => {
     if (row.market_cap === null) return true;
     const updated = new Date(row.updated_at);
     return updated < cutoff;
