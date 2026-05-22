@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-universe",
+      "schedule": "30 22 * * 1-5"
+    }
+  ]
+}
