@@ -177,28 +177,24 @@ export async function GET(request: Request) {
       console.log(`[refresh-universe] pruned ${prunedCount} old rows`);
     }
 
-    // 5. Rebuild universe_snapshot
-    const { data: rebuildResult, error: rebuildErr } = await supabase.rpc(
-      "refresh_universe_snapshot"
-    );
-
-    if (rebuildErr) throw new Error(`snapshot rebuild: ${rebuildErr.message}`);
-
-    const refreshedTickers = rebuildResult?.[0]?.refreshed_tickers ?? 0;
+    // 5. Snapshot rebuild is handled by pg_cron in Supabase at 22:45 UTC (15 min after this).
+    // We don't call it from here to stay under Vercel's 10s timeout.
     const elapsedMs = Date.now() - startedAt;
 
     console.log(
-      `[refresh-universe] complete: ${refreshedTickers} tickers in snapshot, ${elapsedMs}ms total`
+      `[refresh-universe] complete: bars ingested for ${targetDate}, ${elapsedMs}ms total`
     );
 
     return NextResponse.json({
       status: "ok",
       target_date: targetDate,
       already_processed: alreadyProcessed,
-      tickers_in_snapshot: refreshedTickers,
       pruned_rows: prunedCount ?? 0,
       elapsed_ms: elapsedMs,
+      note: "Snapshot rebuild handled by pg_cron at 22:45 UTC",
     });
+
+    
   } catch (e: any) {
     console.error("[refresh-universe] error:", e);
     return NextResponse.json(
