@@ -1,0 +1,38 @@
+# Refreshes ticker_universe.market_cap from Finnhub.
+# Initial run: manually trigger via Actions tab (~65 min for full population).
+# Ongoing: scheduled weekly (Sunday 10:00 UTC).
+#
+# Why weekly: market cap changes daily, but for "is this in the $200M-$2B band"
+# filtering purposes, weekly precision is more than enough. A stock has to move
+# ~50% in a week to cross the band, and if it did, that's worth re-evaluating anyway.
+
+name: Refresh fundamentals
+
+on:
+  workflow_dispatch:  # manual trigger
+  schedule:
+    - cron: '0 10 * * 0'  # Sundays at 10:00 UTC (5am ET, well before any market activity)
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # safety upper bound (script targets ~65 min)
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm install --no-save tsx @supabase/supabase-js
+
+      - name: Refresh fundamentals
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/refresh-fundamentals.ts
