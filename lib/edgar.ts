@@ -1,18 +1,21 @@
 // lib/edgar.ts
 //
 // Minimal SEC EDGAR client for fetching the most recent earnings-related 8-K
-// press release exhibit for a given ticker. Used by the diagnostic page (and
-// future production brief endpoint) to feed real filing text into the AI.
+// for a given ticker. Used by the diagnostic page (and future production
+// brief endpoint) to feed real filing text into the AI.
 //
-// Returns lightly-cleaned HTML preserving structural tags (tables, headers,
-// paragraphs, lists) — models read structure better than flattened text.
+// Returns the primary 8-K document (the form itself) as lightly-cleaned HTML.
+// Under Item 2.02, the form is required to disclose results of operations,
+// which means the key earnings information is reliably present in the primary
+// document — separate Exhibit 99 press releases are common but their filenames
+// vary too much across filers to detect reliably.
+//
+// Filing selection: prefers 8-Ks that report Item 2.02 (Results of Operations
+// and Financial Condition). Falls back to most recent 8-K if no 2.02 filing
+// found in the recent set.
 //
 // EDGAR is free, no API key, ~10 req/sec rate limit.
 // MUST send a User-Agent header with contact info or SEC returns 403.
-//
-// Filing selection: prefers 8-Ks that report Item 2.02 (Results of Operations
-// and Financial Condition) — the SEC-standard tag for earnings releases.
-// Falls back to most recent 8-K if no 2.02 filing found in the recent set.
 
 const SEC_BASE = "https://www.sec.gov";
 const SEC_DATA = "https://data.sec.gov";
@@ -28,8 +31,8 @@ const SEC_HEADERS = {
 export type EdgarFiling = {
   filingDate: string; // YYYY-MM-DD
   accessionNumber: string; // e.g. "0001193125-26-123456"
-  primaryDocument: string; // e.g. "ex991.htm"
-  filingUrl: string; // human-browseable URL
+  primaryDocument: string; // filename of the primary 8-K form document
+  filingUrl: string; // human-browseable URL to the primary document
   items: string; // raw items string from EDGAR e.g. "2.02,9.01"
   isEarningsFiling: boolean; // true if items includes 2.02
 };
@@ -39,8 +42,8 @@ export type Edgar8K = {
   cik: string;
   companyName: string;
   filing: EdgarFiling;
-  pressReleaseHtml: string;
-  pressReleaseUrl: string;
+  documentHtml: string; // cleaned HTML of the primary 8-K document
+  documentUrl: string;
 };
 
 // ---------- Step 1: ticker → CIK ----------
@@ -94,15 +97,14 @@ type SubmissionsResponse = {
       filingDate: string[];
       form: string[];
       primaryDocument: string[];
-      items: string[]; // 8-K Item codes, comma-separated; "" for non-8-K
+      items: string[];
     };
   };
 };
 
 function isEarnings(items: string): boolean {
   if (!items) return false;
-  // Item codes look like "2.02" or "2.02,9.01" — check token boundary so
-  // "12.02" wouldn't match "2.02" (no such item exists today, but be safe).
+  // Item codes look like "2.02" or "2.02,9.01" — check token boundary
   return /\b2\.02\b/.test(items);
 }
 
@@ -121,10 +123,6 @@ async function fetchLatest8KFiling(cik: string): Promise<EdgarFiling | null> {
 
   if (!recent || !Array.isArray(recent.form)) return null;
 
-  // First pass: look for an earnings 8-K (Item 2.02)
-  // Second pass (fallback): any 8-K
-  // recent[] is newest-first.
-
   const buildFiling = (i: number, isEarningsFiling: boolean): EdgarFiling => {
     const accessionRaw = recent.accessionNumber[i];
     const accessionNoDashes = accessionRaw.replace(/-/g, "");
@@ -139,7 +137,7 @@ async function fetchLatest8KFiling(cik: string): Promise<EdgarFiling | null> {
     };
   };
 
-  // Pass 1: earnings 8-K
+  // Pass 1: earnings 8-K (Item 2.02)
   for (let i = 0; i < recent.form.length; i++) {
     if (recent.form[i] === "8-K" && isEarnings(recent.items?.[i] || "")) {
       return buildFiling(i, true);
@@ -156,114 +154,38 @@ async function fetchLatest8KFiling(cik: string): Promise<EdgarFiling | null> {
   return null;
 }
 
-// ---------- Step 3: fetch the press release exhibit ----------
+// ---------- Step 3: fetch the primary 8-K document ----------
 //
-// Exhibit 99.x is the universal SEC convention for press release attachments
-// on 8-Ks. Filenames vary considerably across filers — common patterns:
-//   ex99.htm, ex991.htm, ex99-1.htm, ex_99.htm, ex-99-1.htm
-//   exhibit99.htm, exhibit991.htm, exhibit-99-1.htm
-//   tm262345d1_ex99-1.htm  (lots of filers prefix with a doc ID)
-//   a991.htm, a99-1.htm
-//   pressrelease.htm, prelease.htm, earningsrelease.htm (rare but seen)
-//
-// Strategy: try a series of regex matchers in order from most-specific to
-// least-specific. First match wins.
+// Just fetch whatever the submissions JSON says is the primary document for
+// this filing. No regex guessing, no exhibit hunting. The 8-K form itself is
+// required to disclose results under Item 2.02, so the key information is
+// reliably present here even when separate exhibits exist.
 
-type FilingIndex = {
-  directory: {
-    item: Array<{ name: string; type: string }>;
-  };
-};
-
-function findPressReleaseFilename(items: Array<{ name: string }>): string | null {
-  const names = items.map((it) => ({ orig: it.name, lower: it.name.toLowerCase() }));
-
-  // Skip files that are clearly not exhibits (the form itself, signed docs, etc.)
-  const isForm8K = (n: string) =>
-    /^(form)?8-?k/.test(n) || n.startsWith("8k") || /^d\d+d?8k/.test(n);
-
-  // Skip image, css, xml, txt files
-  const isHtml = (n: string) => n.endsWith(".htm") || n.endsWith(".html");
-
-  const candidates = names.filter(
-    (n) => isHtml(n.lower) && !isForm8K(n.lower)
-  );
-
-  // Tier 1: explicit ex99 / exhibit99 / a99 patterns (covers the vast majority)
-  const ex99Patterns = [
-    /(?:^|[^a-z0-9])ex[-_]?99/i, // ex99, ex_99, ex-99
-    /(?:^|[^a-z0-9])exhibit[-_]?99/i, // exhibit99, exhibit-99, exhibit_99
-    /(?:^|[^a-z0-9])a99(?:[-_]?\d)?\b/i, // a99, a991, a99-1
-  ];
-
-  for (const pat of ex99Patterns) {
-    const match = candidates.find((n) => pat.test(n.lower));
-    if (match) return match.orig;
-  }
-
-  // Tier 2: descriptive filenames (rare, mostly old filings)
-  const descriptivePatterns = [
-    /pressrelease/i,
-    /press[-_]release/i,
-    /earningsrelease/i,
-    /earnings[-_]release/i,
-    /prelease/i,
-  ];
-
-  for (const pat of descriptivePatterns) {
-    const match = candidates.find((n) => pat.test(n.lower));
-    if (match) return match.orig;
-  }
-
-  return null;
-}
-
-async function fetchPressReleaseExhibit(
+async function fetchPrimaryDocument(
   cik: string,
-  accessionRaw: string
+  accessionRaw: string,
+  primaryDocument: string
 ): Promise<{ html: string; url: string } | null> {
   const accessionNoDashes = accessionRaw.replace(/-/g, "");
-  const indexUrl = `${SEC_BASE}/Archives/edgar/data/${parseInt(cik, 10)}/${accessionNoDashes}/index.json`;
+  const url = `${SEC_BASE}/Archives/edgar/data/${parseInt(cik, 10)}/${accessionNoDashes}/${primaryDocument}`;
 
-  const indexRes = await fetch(indexUrl, {
+  const res = await fetch(url, {
     headers: SEC_HEADERS,
     next: { revalidate: 3600 },
   });
 
-  if (!indexRes.ok) {
-    throw new Error(`EDGAR filing index fetch failed: ${indexRes.status}`);
+  if (!res.ok) {
+    throw new Error(`EDGAR document fetch failed (${res.status}): ${url}`);
   }
 
-  const index = (await indexRes.json()) as FilingIndex;
-  const items = index.directory?.item || [];
-
-  const exhibitName = findPressReleaseFilename(items);
-  if (!exhibitName) return null;
-
-  const exhibitUrl = `${SEC_BASE}/Archives/edgar/data/${parseInt(cik, 10)}/${accessionNoDashes}/${exhibitName}`;
-
-  const exRes = await fetch(exhibitUrl, {
-    headers: SEC_HEADERS,
-    next: { revalidate: 3600 },
-  });
-
-  if (!exRes.ok) {
-    throw new Error(`EDGAR exhibit fetch failed: ${exRes.status}`);
-  }
-
-  const rawHtml = await exRes.text();
-  return { html: cleanHtml(rawHtml), url: exhibitUrl };
+  const rawHtml = await res.text();
+  return { html: cleanHtml(rawHtml), url };
 }
 
 // ---------- HTML light cleanup ----------
 //
 // Drop styling/markup noise; keep structural information (tables, headers,
 // lists, emphasis).
-//
-// Stripped: <script>, <style>, <link>, <meta>, HTML comments, XBRL inline
-// tagging wrappers (keep content), all attributes except <a href>, <font>
-// tags (keep content), embedded base64 images, <html>/<head>/<body>/<form>
-// wrappers.
 
 function cleanHtml(html: string): string {
   let out = html;
@@ -322,15 +244,20 @@ export async function fetchLatest8K(ticker: string): Promise<Edgar8K | null> {
   const filing = await fetchLatest8KFiling(entry.cik);
   if (!filing) return null;
 
-  const exhibit = await fetchPressReleaseExhibit(entry.cik, filing.accessionNumber);
-  if (!exhibit) {
+  const doc = await fetchPrimaryDocument(
+    entry.cik,
+    filing.accessionNumber,
+    filing.primaryDocument
+  );
+
+  if (!doc) {
     return {
       ticker: upper,
       cik: entry.cik,
       companyName: entry.name,
       filing,
-      pressReleaseHtml: "",
-      pressReleaseUrl: "",
+      documentHtml: "",
+      documentUrl: "",
     };
   }
 
@@ -339,7 +266,7 @@ export async function fetchLatest8K(ticker: string): Promise<Edgar8K | null> {
     cik: entry.cik,
     companyName: entry.name,
     filing,
-    pressReleaseHtml: exhibit.html,
-    pressReleaseUrl: exhibit.url,
+    documentHtml: doc.html,
+    documentUrl: doc.url,
   };
 }
